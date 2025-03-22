@@ -4,7 +4,8 @@ const cors = require("cors");
 const fs = require("fs");
 const xlsx = require("exceljs");
 const csvParser = require("csv-parser");
-const iconv = require('iconv-lite');
+const iconv = require("iconv-lite");
+const path = require("path");
 
 const uploadDir = "uploads";
 if (!fs.existsSync(uploadDir)) {
@@ -19,14 +20,14 @@ app.use(express.json());
 // Multer storage configuration
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, "uploads");
+    cb(null, uploadDir);
   },
   filename: (req, file, cb) => {
     cb(null, file.originalname);
   },
 });
 
-const upload = multer({ storage });
+const upload = multer({ storage: storage });
 
 // Process multiple CSV files and track attendance
 app.post("/download", upload.array("files"), async (req, res) => {
@@ -34,36 +35,36 @@ app.post("/download", upload.array("files"), async (req, res) => {
     return res.status(400).json({ message: "No files uploaded" });
   }
 
-  // Object to store attendance counts for each student
   const attendanceCount = {};
 
-  // Process each uploaded file
   for (const file of req.files) {
-    const filepath = file.path;
-    console.log(`Processing file: ${file.originalname}`);
-    
-    // Process this CSV file
-    await processAttendanceFile(filepath, attendanceCount);
+    const filepath = path.join(uploadDir, file.originalname);
+    console.log(`Processing file: ${filepath}`);
+
+    try {
+      await processAttendanceFile(filepath, attendanceCount);
+    } catch (error) {
+      console.error("Error processing file:", error);
+      return res
+        .status(500)
+        .json({ message: "Failed to process file", error: error.message });
+    }
   }
 
   console.log("Final attendance count:", attendanceCount);
 
-  // Create XLSX with the compiled attendance data
   const workbook = new xlsx.Workbook();
   const worksheet = workbook.addWorksheet("Attendance Summary");
-  
-  // Define columns
+
   worksheet.columns = [
     { header: "Name", key: "name", width: 30 },
-    { header: "Days Present", key: "daysPresent", width: 15 }
+    { header: "Days Present", key: "daysPresent", width: 15 },
   ];
 
-  // Add rows from the attendance data
   Object.entries(attendanceCount).forEach(([name, count]) => {
     worksheet.addRow({ name, daysPresent: count });
   });
 
-  // Set response headers for file download
   res.setHeader(
     "Content-Disposition",
     'attachment; filename="attendance_summary.xlsx"'
@@ -73,12 +74,10 @@ app.post("/download", upload.array("files"), async (req, res) => {
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
   );
 
-  // Write the file to response
   await workbook.xlsx.write(res);
   res.end();
 
-  // Clean up uploaded files
-  req.files.forEach(file => {
+  req.files.forEach((file) => {
     fs.unlink(file.path, (err) => {
       if (err) console.error("Error deleting file:", err);
     });
@@ -86,43 +85,64 @@ app.post("/download", upload.array("files"), async (req, res) => {
 });
 
 async function processAttendanceFile(filepath, attendanceCount) {
-    return new Promise((resolve, reject) => {
-      // Set to track unique attendees in this file
-      const uniqueAttendeesInFile = new Set();
-  
-      fs.createReadStream(filepath)
-        .pipe(iconv.decodeStream('utf-8'))
-        .pipe(csvParser({
-          trim: false,
+  return new Promise((resolve, reject) => {
+    const uniqueAttendeesInFile = new Set();
+    let inParticipantsSection = false;
+    let isActivitiesSection = false;
+    let headerSkipped = false;
+
+    fs.createReadStream(filepath)
+      .pipe(iconv.decodeStream("utf16le"))
+      .pipe(
+        csvParser({
+          trim: true,
+          skip_empty_lines: true,
+          separator: "\t",
           quote: '"',
-          ltrim: true,
-          rtrim: true,
-          skip_empty_lines: true
-        }))
-        .on("data", (row) => {
-          let fullName = row["Name"] || "";
-          fullName = fullName.replace(/^"|"$/g, '').trim();
-          
-          let role = row["Role"] ? row["Role"].trim().toLowerCase() : "";
-  
-          // Only count if attendee AND name not already processed in this file
-          if (role === "attendee" && fullName && !uniqueAttendeesInFile.has(fullName)) {
-            uniqueAttendeesInFile.add(fullName);
-            
-            // Increment the attendance count
-            if (attendanceCount[fullName]) {
-              attendanceCount[fullName]++;
-            } else {
-              attendanceCount[fullName] = 1;
+          headers: false,
+        })
+      )
+      .on("data", (row) => {
+        console.log("Row Data:", row);
+
+        if (!headerSkipped && row[0] && row[0].includes("Name") && row[6] && row[6].includes("Role")) {
+          headerSkipped = true;
+          inParticipantsSection = true;
+          return;
+        }
+
+        if (inParticipantsSection) {
+          let fullName = row[0] || ""; // Name is in the first column
+          let role = row[6] || ""; // Role is in the 7th column
+          fullName = fullName.trim();
+          role = role.trim().toLowerCase();
+
+          if (role === "presenter" || role === "organizer") {
+            const name = fullName.split('(')[0].trim();
+            if (name && !uniqueAttendeesInFile.has(name)) {
+              uniqueAttendeesInFile.add(name);
+              if (attendanceCount[name]) {
+                attendanceCount[name]++;
+              } else {
+                attendanceCount[name] = 1;
+              }
             }
           }
-        })
-        .on("end", () => {
-          resolve();
-        });
-    });
-  }
-  
+        }
+      })
+      .on("end", () => {
+        console.log("Processed file:", filepath);
+        resolve();
+      })
+      .on("error", (err) => {
+        console.error("Error processing file:", err);
+        reject(err);
+      });
+  });
+}
+
+
+
 // Server setup
 const port = 5000;
 app.listen(port, () => console.log(`Server running on port ${port}`));
