@@ -118,16 +118,22 @@ async function processAttendanceFile(filepath, attendanceCount) {
           role = role.trim().toLowerCase();
 
           if (role === "presenter" || role === "organizer") {
-            const name = fullName.split('(')[0].trim();
-            if (name && !uniqueAttendeesInFile.has(name)) {
-              uniqueAttendeesInFile.add(name);
-              if (attendanceCount[name]) {
-                attendanceCount[name]++;
-              } else {
-                attendanceCount[name] = 1;
+            if (
+              fullName.endsWith("(Guest)") &&
+              !fullName.toLowerCase().includes("unverified")
+            ) {
+              const name = fullName.trim();
+              if (!uniqueAttendeesInFile.has(name)) {
+                uniqueAttendeesInFile.add(name);
+                if (attendanceCount[name]) {
+                  attendanceCount[name]++;
+                } else {
+                  attendanceCount[name] = 1;
+                }
               }
             }
           }
+          
         }
       })
       .on("end", () => {
