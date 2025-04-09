@@ -17,7 +17,6 @@ app.use(cors());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// Multer storage configuration
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, uploadDir);
@@ -29,7 +28,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage: storage });
 
-// Process multiple CSV files and track attendance
+// POST route for uploading and processing files
 app.post("/download", upload.array("files"), async (req, res) => {
   if (!req.files || req.files.length === 0) {
     return res.status(400).json({ message: "No files uploaded" });
@@ -45,24 +44,29 @@ app.post("/download", upload.array("files"), async (req, res) => {
       await processAttendanceFile(filepath, attendanceCount);
     } catch (error) {
       console.error("Error processing file:", error);
-      return res
-        .status(500)
-        .json({ message: "Failed to process file", error: error.message });
+      return res.status(500).json({
+        message: "Failed to process file",
+        error: error.message,
+      });
     }
   }
 
-  console.log("Final attendance count:", attendanceCount);
-
+  // Create Excel file
   const workbook = new xlsx.Workbook();
   const worksheet = workbook.addWorksheet("Attendance Summary");
 
   worksheet.columns = [
     { header: "Name", key: "name", width: 30 },
+    { header: "Email", key: "email", width: 30 },
     { header: "Days Present", key: "daysPresent", width: 15 },
   ];
 
-  Object.entries(attendanceCount).forEach(([name, count]) => {
-    worksheet.addRow({ name, daysPresent: count });
+  Object.values(attendanceCount).forEach(({ name, email, count }) => {
+    worksheet.addRow({
+      name,
+      email,
+      daysPresent: count,
+    });
   });
 
   res.setHeader(
@@ -77,6 +81,7 @@ app.post("/download", upload.array("files"), async (req, res) => {
   await workbook.xlsx.write(res);
   res.end();
 
+  // Delete uploaded files
   req.files.forEach((file) => {
     fs.unlink(file.path, (err) => {
       if (err) console.error("Error deleting file:", err);
@@ -84,11 +89,11 @@ app.post("/download", upload.array("files"), async (req, res) => {
   });
 });
 
+// Helper function to process each file
 async function processAttendanceFile(filepath, attendanceCount) {
   return new Promise((resolve, reject) => {
     const uniqueAttendeesInFile = new Set();
     let inParticipantsSection = false;
-    let isActivitiesSection = false;
     let headerSkipped = false;
 
     fs.createReadStream(filepath)
@@ -103,37 +108,43 @@ async function processAttendanceFile(filepath, attendanceCount) {
         })
       )
       .on("data", (row) => {
-        console.log("Row Data:", row);
-
-        if (!headerSkipped && row[0] && row[0].includes("Name") && row[6] && row[6].includes("Role")) {
+        if (
+          !headerSkipped &&
+          row[0]?.includes("Name") &&
+          row[6]?.includes("Role")
+        ) {
           headerSkipped = true;
           inParticipantsSection = true;
           return;
         }
 
         if (inParticipantsSection) {
-          let fullName = row[0] || ""; // Name is in the first column
-          let role = row[6] || ""; // Role is in the 7th column
-          fullName = fullName.trim();
-          role = role.trim().toLowerCase();
+          const fullName = row[0]?.trim() || "";
+          const email = row[4]?.trim().toLowerCase() || "";
+          const role = row[6]?.trim().toLowerCase() || "";
 
-          if (role === "presenter" || role === "organizer") {
-            if (
-              fullName.endsWith("(Guest)") &&
-              !fullName.toLowerCase().includes("unverified")
-            ) {
-              const name = fullName.trim();
-              if (!uniqueAttendeesInFile.has(name)) {
-                uniqueAttendeesInFile.add(name);
-                if (attendanceCount[name]) {
-                  attendanceCount[name]++;
-                } else {
-                  attendanceCount[name] = 1;
-                }
+          if (
+            (role === "presenter" || role === "organizer") &&
+            email &&
+            !fullName.toLowerCase().includes("unverified")
+          ) {
+            const cleanName = fullName.replace(/\s*\(Guest\)/i, "").trim();
+            const uniqueKey = email; // key based on email to prevent duplicates
+
+            if (!uniqueAttendeesInFile.has(uniqueKey)) {
+              uniqueAttendeesInFile.add(uniqueKey);
+
+              if (attendanceCount[uniqueKey]) {
+                attendanceCount[uniqueKey].count += 1;
+              } else {
+                attendanceCount[uniqueKey] = {
+                  name: cleanName,
+                  email,
+                  count: 1,
+                };
               }
             }
           }
-          
         }
       })
       .on("end", () => {
@@ -147,8 +158,6 @@ async function processAttendanceFile(filepath, attendanceCount) {
   });
 }
 
-
-
-// Server setup
+// Server start
 const port = 5000;
 app.listen(port, () => console.log(`Server running on port ${port}`));
